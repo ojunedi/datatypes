@@ -286,110 +286,143 @@ impl Lowerer {
             }),
             Expr::Var(v, _) => k.invoke(Immediate::Var(subst.run(v))),
             Expr::Prim { prim, args, loc: _ } => {
+                let lower_unary =
+                    |lowerer: &mut Lowerer,
+                     assert_ty: Type,
+                     args: Vec<BoundExpr>,
+                     k: Continuation,
+                     make_op: fn(Immediate) -> Operation| {
+                        let arg = args.into_iter().next().unwrap();
+                        let arg_var = lowerer.vars.fresh("unary_arg");
+                        let (dest, next) = lowerer.kont_to_block(k);
+
+                        let body = BlockBody::AssertType {
+                            ty: assert_ty,
+                            arg: Immediate::Var(arg_var.clone()),
+                            next: Box::new(BlockBody::Operation {
+                                dest,
+                                op: make_op(Immediate::Var(arg_var.clone())),
+                                next: Box::new(next),
+                            }),
+                        };
+
+                        lowerer.lower_expr_kont(
+                            arg,
+                            live,
+                            subst,
+                            Continuation::Block(arg_var, body),
+                        )
+                    };
+
+                let lower_binary =
+                    |lowerer: &mut Lowerer,
+                     assert_ty: Type,
+                     args: Vec<BoundExpr>,
+                     k: Continuation,
+                     make_op: fn(Immediate, Immediate) -> Operation| {
+                        let mut args = args.into_iter();
+                        let lhs = args.next().unwrap();
+                        let rhs = args.next().unwrap();
+                        let lhs_var = lowerer.vars.fresh("bin_lhs");
+                        let rhs_var = lowerer.vars.fresh("bin_rhs");
+                        let (dest, next) = lowerer.kont_to_block(k);
+
+                        let body = BlockBody::AssertType {
+                            ty: assert_ty,
+                            arg: Immediate::Var(lhs_var.clone()),
+                            next: Box::new(BlockBody::AssertType {
+                                ty: assert_ty,
+                                arg: Immediate::Var(rhs_var.clone()),
+                                next: Box::new(BlockBody::Operation {
+                                    dest,
+                                    op: make_op(
+                                        Immediate::Var(lhs_var.clone()),
+                                        Immediate::Var(rhs_var.clone()),
+                                    ),
+                                    next: Box::new(next),
+                                }),
+                            }),
+                        };
+
+                        let body = lowerer.lower_expr_kont(
+                            rhs,
+                            live,
+                            subst,
+                            Continuation::Block(rhs_var, body),
+                        );
+                        lowerer.lower_expr_kont(
+                            lhs,
+                            live,
+                            subst,
+                            Continuation::Block(lhs_var, body),
+                        )
+                    };
+                let lower_cmp = |lowerer: &mut Lowerer,
+                                 prim2: Prim2,
+                                 args: Vec<BoundExpr>,
+                                 k: Continuation,
+                                 assert_ty: Type| {
+                    let mut args = args.into_iter();
+                    let lhs = args.next().unwrap();
+                    let rhs = args.next().unwrap();
+                    let lhs_var = lowerer.vars.fresh("cmp_lhs");
+                    let rhs_var = lowerer.vars.fresh("cmp_rhs");
+                    let cmp_var = lowerer.vars.fresh("cmp_result");
+                    let shifted = lowerer.vars.fresh("cmp_shifted");
+                    let (dest, next) = lowerer.kont_to_block(k);
+
+                    let tag_bool = BlockBody::Operation {
+                        dest: cmp_var.clone(),
+                        op: Operation::Prim2(
+                            prim2,
+                            Immediate::Var(lhs_var.clone()),
+                            Immediate::Var(rhs_var.clone()),
+                        ),
+                        next: Box::new(BlockBody::Operation {
+                            dest: shifted.clone(),
+                            op: Operation::Prim1(Prim1::BitSal(2), Immediate::Var(cmp_var.clone())),
+                            next: Box::new(BlockBody::Operation {
+                                dest,
+                                op: Operation::Prim2(
+                                    Prim2::BitOr,
+                                    Immediate::Var(shifted.clone()),
+                                    Immediate::Const(0b001),
+                                ),
+                                next: Box::new(next),
+                            }),
+                        }),
+                    };
+
+                    let body = BlockBody::AssertType {
+                        ty: assert_ty,
+                        arg: Immediate::Var(lhs_var.clone()),
+                        next: Box::new(BlockBody::AssertType {
+                            ty: assert_ty,
+                            arg: Immediate::Var(rhs_var.clone()),
+                            next: Box::new(tag_bool),
+                        }),
+                    };
+
+                    let body = lowerer.lower_expr_kont(
+                        rhs,
+                        live,
+                        subst,
+                        Continuation::Block(rhs_var, body),
+                    );
+                    lowerer.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
+                };
                 match prim {
-                    Prim::Add1 => {
-                        let arg = args.into_iter().next().unwrap();
-                        let arg_var = self.vars.fresh("add1_arg");
-                        let (dest, next) = self.kont_to_block(k);
-                        let body = BlockBody::AssertType {
-                            ty: Type::Int,
-                            arg: Immediate::Var(arg_var.clone()),
-                            next: Box::new(BlockBody::Operation {
-                                dest,
-                                // adding 2 because we represent as 2*n, so 2*(n+1) = 2*n + 2
-                                op: Operation::Prim2(
-                                    Prim2::Add,
-                                    Immediate::Var(arg_var.clone()),
-                                    Immediate::Const(2),
-                                ),
-                                next: Box::new(next),
-                            }),
-                        };
-                        self.lower_expr_kont(arg, live, subst, Continuation::Block(arg_var, body))
-                    }
-                    Prim::Sub1 => {
-                        let arg = args.into_iter().next().unwrap();
-                        let arg_var = self.vars.fresh("sub1_arg");
-                        let (dest, next) = self.kont_to_block(k);
-                        let body = BlockBody::AssertType {
-                            ty: Type::Int,
-                            arg: Immediate::Var(arg_var.clone()),
-                            next: Box::new(BlockBody::Operation {
-                                dest,
-                                op: Operation::Prim2(
-                                    Prim2::Sub,
-                                    Immediate::Var(arg_var.clone()),
-                                    Immediate::Const(2),
-                                ),
-                                next: Box::new(next),
-                            }),
-                        };
-                        self.lower_expr_kont(arg, live, subst, Continuation::Block(arg_var, body))
-                    }
-                    Prim::Add => {
-                        let mut args = args.into_iter();
-                        let lhs = args.next().unwrap();
-                        let rhs = args.next().unwrap();
-                        let lhs_var = self.vars.fresh("add_lhs");
-                        let rhs_var = self.vars.fresh("add_rhs");
-                        let (dest, next) = self.kont_to_block(k);
-                        let body = BlockBody::AssertType {
-                            ty: Type::Int,
-                            arg: Immediate::Var(lhs_var.clone()),
-                            next: Box::new(BlockBody::AssertType {
-                                ty: Type::Int,
-                                arg: Immediate::Var(rhs_var.clone()),
-                                next: Box::new(BlockBody::Operation {
-                                    dest,
-                                    op: Operation::Prim2(
-                                        Prim2::Add,
-                                        Immediate::Var(lhs_var.clone()),
-                                        Immediate::Var(rhs_var.clone()),
-                                    ),
-                                    next: Box::new(next),
-                                }),
-                            }),
-                        };
-                        let body = self.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
-                        self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
-                    }
-                    Prim::Sub => {
-                        let mut args = args.into_iter();
-                        let lhs = args.next().unwrap();
-                        let rhs = args.next().unwrap();
-                        let lhs_var = self.vars.fresh("sub_lhs");
-                        let rhs_var = self.vars.fresh("sub_rhs");
-                        let (dest, next) = self.kont_to_block(k);
-                        let body = BlockBody::AssertType {
-                            ty: Type::Int,
-                            arg: Immediate::Var(lhs_var.clone()),
-                            next: Box::new(BlockBody::AssertType {
-                                ty: Type::Int,
-                                arg: Immediate::Var(rhs_var.clone()),
-                                next: Box::new(BlockBody::Operation {
-                                    dest,
-                                    op: Operation::Prim2(
-                                        Prim2::Sub,
-                                        Immediate::Var(lhs_var.clone()),
-                                        Immediate::Var(rhs_var.clone()),
-                                    ),
-                                    next: Box::new(next),
-                                }),
-                            }),
-                        };
-                        let body = self.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
-                        self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
-                    }
+                    Prim::Add1 => lower_unary(self, Type::Int, args, k, |a| Operation::Prim2(Prim2::Add, a, Immediate::Const(2))),
+                    Prim::Sub1 => lower_unary(self, Type::Int, args, k, |a| Operation::Prim2(Prim2::Sub, a, Immediate::Const(2))),
+                    Prim::Not  => lower_unary(self, Type::Bool, args, k, |a| Operation::Prim2(Prim2::BitXor, a, Immediate::Const(0b100))),
+                    Prim::Add  => lower_binary(self, Type::Int, args, k, |a, b| Operation::Prim2(Prim2::Add, a, b)),
+                    Prim::Sub  => lower_binary(self, Type::Int, args, k, |a, b| Operation::Prim2(Prim2::Sub, a, b)),
+                    Prim::And  => lower_binary(self, Type::Bool, args, k, |a, b| Operation::Prim2(Prim2::BitAnd, a, b)),
+                    Prim::Or   => lower_binary(self, Type::Bool, args, k, |a, b| Operation::Prim2(Prim2::BitOr, a, b)),
+                    Prim::Lt => lower_cmp(self, Prim2::Lt, args, k, Type::Int),
+                    Prim::Le => lower_cmp(self, Prim2::Le, args, k, Type::Int),
+                    Prim::Gt => lower_cmp(self, Prim2::Gt, args, k, Type::Int),
+                    Prim::Ge => lower_cmp(self, Prim2::Ge, args, k, Type::Int),
                     Prim::Mul => {
                         // need to untag one of the arguments before we multiply them
                         // 2n * 2m = 4mn
@@ -433,13 +466,6 @@ impl Lowerer {
                         );
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
-                    Prim::Not => todo!(),
-                    Prim::And => todo!(),
-                    Prim::Or => todo!(),
-                    Prim::Lt => todo!(),
-                    Prim::Le => todo!(),
-                    Prim::Gt => todo!(),
-                    Prim::Ge => todo!(),
                     Prim::Eq => todo!(),
                     Prim::Neq => todo!(),
                     Prim::IsType(_) => todo!(),
