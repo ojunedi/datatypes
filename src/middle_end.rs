@@ -358,8 +358,81 @@ impl Lowerer {
                         );
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
-                    Prim::Sub => todo!(),
-                    Prim::Mul => todo!(),
+                    Prim::Sub => {
+                        let mut args = args.into_iter();
+                        let lhs = args.next().unwrap();
+                        let rhs = args.next().unwrap();
+                        let lhs_var = self.vars.fresh("sub_lhs");
+                        let rhs_var = self.vars.fresh("sub_rhs");
+                        let (dest, next) = self.kont_to_block(k);
+                        let body = BlockBody::AssertType {
+                            ty: Type::Int,
+                            arg: Immediate::Var(lhs_var.clone()),
+                            next: Box::new(BlockBody::AssertType {
+                                ty: Type::Int,
+                                arg: Immediate::Var(rhs_var.clone()),
+                                next: Box::new(BlockBody::Operation {
+                                    dest,
+                                    op: Operation::Prim2(
+                                        Prim2::Sub,
+                                        Immediate::Var(lhs_var.clone()),
+                                        Immediate::Var(rhs_var.clone()),
+                                    ),
+                                    next: Box::new(next),
+                                }),
+                            }),
+                        };
+                        let body = self.lower_expr_kont(
+                            rhs,
+                            live,
+                            subst,
+                            Continuation::Block(rhs_var, body),
+                        );
+                        self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
+                    }
+                    Prim::Mul => {
+                        // need to untag one of the arguments before we multiply them
+                        // 2n * 2m = 4mn
+                        // n * 2m = 2mn
+                        let mut args = args.into_iter();
+                        let lhs = args.next().unwrap();
+                        let rhs = args.next().unwrap();
+                        let lhs_var = self.vars.fresh("sub_lhs");
+                        let rhs_var = self.vars.fresh("sub_rhs");
+                        let untagged = self.vars.fresh("untagged");
+                        let (dest, next) = self.kont_to_block(k);
+                        let body = BlockBody::AssertType {
+                            ty: Type::Int,
+                            arg: Immediate::Var(lhs_var.clone()),
+                            next: Box::new(BlockBody::Operation {
+                                dest: untagged.clone(),
+                                op: Operation::Prim1(
+                                    Prim1::BitShr(1),
+                                    Immediate::Var(lhs_var.clone()),
+                                ),
+                                next: Box::new(BlockBody::AssertType {
+                                    ty: Type::Int,
+                                    arg: Immediate::Var(rhs_var.clone()),
+                                    next: Box::new(BlockBody::Operation {
+                                        dest,
+                                        op: Operation::Prim2(
+                                            Prim2::Sub,
+                                            Immediate::Var(untagged.clone()),
+                                            Immediate::Var(rhs_var.clone()),
+                                        ),
+                                        next: Box::new(next),
+                                    }),
+                                }),
+                            }),
+                        };
+                        let body = self.lower_expr_kont(
+                            rhs,
+                            live,
+                            subst,
+                            Continuation::Block(rhs_var, body),
+                        );
+                        self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
+                    }
                     Prim::Not => todo!(),
                     Prim::And => todo!(),
                     Prim::Or => todo!(),
