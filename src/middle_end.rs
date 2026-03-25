@@ -407,7 +407,7 @@ impl Lowerer {
                             next: Box::new(BlockBody::Operation {
                                 dest: untagged.clone(),
                                 op: Operation::Prim1(
-                                    Prim1::BitShr(1),
+                                    Prim1::BitSar(1),
                                     Immediate::Var(lhs_var.clone()),
                                 ),
                                 next: Box::new(BlockBody::AssertType {
