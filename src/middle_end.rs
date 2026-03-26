@@ -783,7 +783,7 @@ impl Lowerer {
                             })
                         };
 
-                    self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var.clone(), body))
+                        self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var.clone(), body))
 
                     },
                 }
@@ -826,13 +826,64 @@ impl Lowerer {
                     },
                 )
             }
-            Expr::If {
-                cond,
-                thn,
-                els,
-                loc: _,
-            } => {
-                todo!("implement if expression")
+            Expr::If {cond, thn, els, loc: _,} => {
+
+                let cond_var = self.vars.fresh("cond_var");
+                let test_var = self.vars.fresh("cond_test");
+                let thn_block = self.blocks.fresh("then");
+                let els_block = self.blocks.fresh("else");
+                let join_block = self.blocks.fresh("join");
+                let (dest, next) = self.kont_to_block(k);
+
+                let thn_result = self.vars.fresh("thn_result");
+                let thn_cont = Continuation::Block(
+                    thn_result.clone(),
+                    BlockBody::Terminator(Terminator::Branch(Branch {
+                        target: join_block.clone(),
+                        args: vec![Immediate::Var(thn_result)],
+                    })),
+                );
+                let els_result = self.vars.fresh("els_result");
+                let els_cont = Continuation::Block(
+                    els_result.clone(),
+                    BlockBody::Terminator(Terminator::Branch(Branch {
+                        target: join_block.clone(),
+                        args: vec![Immediate::Var(els_result)],
+                    })),
+                );
+
+                let thn_body = self.lower_expr_kont(*thn, live, subst, thn_cont);
+                let els_body = self.lower_expr_kont(*els, live, subst, els_cont);
+
+                // join block receives the result and continues
+                let join = BasicBlock {
+                    label: join_block,
+                    params: vec![dest],
+                    body: next,
+                };
+
+                let body = BlockBody::AssertType {
+                    ty: Type::Bool,
+                    arg: Immediate::Var(cond_var.clone()),
+                    next: Box::new(BlockBody::Operation {
+                        dest: test_var.clone(),
+                        op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(cond_var.clone()), Immediate::Const(0b100)),
+                        next: Box::new(BlockBody::SubBlocks {
+                            blocks: vec![
+                                BasicBlock { label: thn_block.clone(), params: vec![], body: thn_body },
+                                BasicBlock { label: els_block.clone(), params: vec![], body: els_body },
+                                join,
+                            ],
+                            next: Box::new(BlockBody::Terminator(Terminator::ConditionalBranch {
+                                cond: Immediate::Var(test_var.clone()),
+                                thn: thn_block,
+                                els: els_block,
+                            })),
+                        }),
+                    }),
+                };
+
+                self.lower_expr_kont(*cond, live, subst, Continuation::Block(cond_var, body))
             }
             Expr::FunDefs {
                 decls,
