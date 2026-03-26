@@ -646,11 +646,147 @@ impl Lowerer {
 
                         body
                     }
-                    Prim::ArrayGet => todo!(),
-                    Prim::ArraySet => todo!(),
-                    Prim::Length => todo!(),
+                    Prim::ArrayGet => {
+                        let mut args = args.into_iter();
+                        let arr = args.next().unwrap();
+                        let ind = args.next().unwrap();
+                        let arr_var = self.vars.fresh("arr_var");
+                        let ind_var = self.vars.fresh("ind_var");
+                        let untagged_idx = self.vars.fresh("untagged_idx");
+                        let arr_len = self.vars.fresh("arr_len");
+                        let untagged_arr = self.vars.fresh("untagged_arr");
+                        let offset_var = self.vars.fresh("arr_offset");
+                        let (dest, next) = self.kont_to_block(k);
+
+                        let body = BlockBody::AssertType { // assert arr
+                            ty: Type::Array,
+                            arg: Immediate::Var(arr_var.clone()),
+                            next: Box::new(BlockBody::AssertType { // assert int
+                                ty: Type::Int,
+                                arg: Immediate::Var(ind_var.clone()),
+                                next: Box::new(BlockBody::Operation {
+                                    dest: untagged_idx.clone(),
+                                    op: Operation::Prim1(Prim1::BitSar(1), Immediate::Var(ind_var.clone())), // untag index
+                                    next: Box::new(BlockBody::Operation {
+                                        dest: untagged_arr.clone(),
+                                        op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)), // untag arr
+                                        next: Box::new(BlockBody::Operation {
+                                            dest: arr_len.clone(),
+                                            op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
+                                            next: Box::new(BlockBody::AssertInBounds {
+                                                bound: Immediate::Var(arr_len.clone()),
+                                                arg: Immediate::Var(untagged_idx.clone()),
+                                                next: Box::new(BlockBody::Operation {
+                                                    dest: offset_var.clone(),
+                                                    op: Operation::Prim2(Prim2::Add, Immediate::Var(untagged_idx.clone()), Immediate::Const(1)),
+                                                    next: Box::new(BlockBody::Operation {
+                                                        dest,
+                                                        op: Operation::Load {
+                                                            addr: Immediate::Var(untagged_arr.clone()),
+                                                            offset: Immediate::Var(offset_var.clone()),
+                                                        },
+                                                        next: Box::new(next),
+                                                    }),
+                                                }),
+                                            })
+                                        })
+                                    })
+                                })
+                            })
+                        };
+
+                        let body = self.lower_expr_kont(ind, live, subst, Continuation::Block(ind_var, body));
+                        self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var, body))
+                    }
+                    Prim::ArraySet => {
+                        let mut args = args.into_iter();
+                        let arr = args.next().unwrap();
+                        let ind = args.next().unwrap();
+                        let val = args.next().unwrap();
+                        let arr_var = self.vars.fresh("arr_var");
+                        let ind_var = self.vars.fresh("ind_var");
+                        let val_var = self.vars.fresh("val_var");
+                        let untagged_idx = self.vars.fresh("untagged_idx");
+                        let arr_len = self.vars.fresh("arr_len");
+                        let untagged_arr = self.vars.fresh("untagged_arr");
+                        let offset_var = self.vars.fresh("arr_offset");
+                        let (dest, next) = self.kont_to_block(k);
+
+                        let body = BlockBody::AssertType { // assert arr
+                            ty: Type::Array,
+                            arg: Immediate::Var(arr_var.clone()),
+                            next: Box::new(BlockBody::AssertType { // assert int
+                                ty: Type::Int,
+                                arg: Immediate::Var(ind_var.clone()),
+                                next: Box::new(BlockBody::Operation {
+                                    dest: untagged_idx.clone(),
+                                    op: Operation::Prim1(Prim1::BitSar(1), Immediate::Var(ind_var.clone())), // untag index
+                                    next: Box::new(BlockBody::Operation {
+                                        dest: untagged_arr.clone(),
+                                        op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)), // untag arr
+                                        next: Box::new(BlockBody::Operation {
+                                            dest: arr_len.clone(),
+                                            op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
+                                            next: Box::new(BlockBody::AssertInBounds {
+                                                bound: Immediate::Var(arr_len.clone()),
+                                                arg: Immediate::Var(untagged_idx.clone()),
+                                                next: Box::new(BlockBody::Operation {
+                                                    dest: offset_var.clone(),
+                                                    op: Operation::Prim2(Prim2::Add, Immediate::Var(untagged_idx.clone()), Immediate::Const(1)),
+                                                    next: Box::new(BlockBody::Store {
+                                                        addr: Immediate::Var(untagged_arr.clone()),
+                                                        offset: Immediate::Var(offset_var.clone()),
+                                                        val: Immediate::Var(val_var.clone()),
+                                                        next: Box::new(BlockBody::Operation {
+                                                            dest,
+                                                            op: Operation::Immediate(Immediate::Var(val_var.clone())),
+                                                            next: Box::new(next),
+                                                        }),
+                                                    }),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        };
+
+                        let body = self.lower_expr_kont(val, live, subst, Continuation::Block(val_var, body));
+                        let body = self.lower_expr_kont(ind, live, subst, Continuation::Block(ind_var, body));
+                        self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var, body))
+                    },
+                    Prim::Length => {
+                        // get arr and check it's an array
+
+                        let arr = args.into_iter().next().unwrap();
+                        let arr_var = self.vars.fresh("arg_var");
+                        let untagged_arr = self.vars.fresh("untagged_arr");
+                        let untagged_len = self.vars.fresh("untagged_len");
+                        let (dest, next) = self.kont_to_block(k);
+
+
+                        let body = BlockBody::AssertType { // assert arr
+                            ty: Type::Array,
+                            arg: Immediate::Var(arr_var.clone()),
+                            next: Box::new(BlockBody::Operation {
+                                dest: untagged_arr.clone(),
+                                op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)), // untag arr
+                                next: Box::new(BlockBody::Operation {
+                                    dest: untagged_len.clone(),
+                                    op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
+                                    next: Box::new(BlockBody::Operation {
+                                        dest,
+                                        op: Operation::Prim1(Prim1::BitSal(1), Immediate::Var(untagged_len.clone())), // tag the int
+                                        next: Box::new(next),
+                                    })
+                                })
+                            })
+                        };
+
+                    self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var.clone(), body))
+
+                    },
                 }
-                // todo!("implement these primitive operators")
             }
             Expr::Let {
                 bindings,
