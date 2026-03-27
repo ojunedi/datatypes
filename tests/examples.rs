@@ -65,6 +65,9 @@ mod public_adder {
      * intermediate representation.
      */
     mk_middle_end_test!(test1_middleend, "add1.dbk", ["42"], "43");
+    mk_middle_end_test!(test2_middleend, "peano.dbk", ["1000"], "1001");
+    mk_middle_end_test!(test3_middleend, "local_non_tail_call.dbk", ["17"], "19");
+    mk_middle_end_test!(test4_middleend, "array_get_and_set.dbk", ["1"], "10");
 
     /*
      * The following test checks that when run on exmaples/free.dbk, the

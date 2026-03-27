@@ -1,0 +1,5 @@
+def main(y):
+    let x = [1, 2, 3] in
+    let z = x[0] + x[1] + x[2] in
+    let _ = x[0] := 5 in
+    x[0] + x[1] + x[2]
