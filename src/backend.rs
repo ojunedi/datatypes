@@ -2,6 +2,7 @@
 //! representation into assembly code, mapping intermediate
 //! representation variables into concrete memory locations.
 
+use std::fmt::format;
 use crate::asm::*;
 use crate::identifiers::*;
 use crate::middle_end::Lowerer;
@@ -61,6 +62,21 @@ impl Emitter {
 
     fn emit(&mut self, instr: Instr) {
         self.instrs.push(instr);
+    }
+
+    fn emit_overflow_check<'a>(&mut self, env: &mut Env<'a>) {
+        let ok_label = format!("overflow_ok_{}", env.next);
+        self.emit(Instr::JCC(ConditionCode::NO, ok_label.clone()));
+        self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(SnakeErr::ArithmeticOverflow as i64))));
+        self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::Rax))));
+        let frame_size = {
+            let mut f = env.next;
+            f += if f % 2 == 1 { 0 } else { 1 };
+            f
+        };
+        self.emit(Instr::Sub(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+        self.emit(Instr::Call(JmpArgs::Label("snake_error".to_string())));
+        self.emit(Instr::Label(ok_label));
     }
 
     pub fn emit_prog(&mut self, prog: &Program) {
@@ -147,10 +163,116 @@ impl Emitter {
                     self.emit_block_body(body, &mut env);
                 }
             }
-            BlockBody::AssertType { ty, arg, next } => todo!(),
-            BlockBody::AssertLength { len, next } => todo!(),
-            BlockBody::AssertInBounds { bound, arg, next } => todo!(),
-            BlockBody::Store { addr, offset, val, next } => todo!(),
+            BlockBody::AssertType { ty, arg, next } => {
+                let ok_label = format!("assert_type_ok_{}", env.next);
+
+                self.emit_imm_reg(arg, Reg::R10, env);
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rax, Arg64::Reg(Reg::R10))));
+                self.emit(Instr::And(BinArgs::ToReg(Reg::Rax, Arg32::Signed(ty.mask() as i32))));
+                self.emit(Instr::Cmp(BinArgs::ToReg(Reg::Rax, Arg32::Signed(ty.tag() as i32))));
+                self.emit(Instr::JCC(ConditionCode::E, ok_label.clone()));
+
+                let err_code = match ty {
+                    Type::Int => SnakeErr::ExpectedNum as i64,
+                    Type::Bool => SnakeErr::ExpectedBool as i64,
+                    Type::Array => SnakeErr::ExpectedArray as i64,
+                };
+
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(err_code))));
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::R10))));
+
+                // align stack and call
+                let frame_size = {
+                    let mut f = env.next;
+                    f += if f % 2 == 1 { 0 } else { 1 };
+                    f
+                };
+                self.emit(Instr::Sub(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+                self.emit(Instr::Call(JmpArgs::Label("snake_error".to_string())));
+
+                // ok path
+                self.emit(Instr::Label(ok_label));
+                self.emit_block_body(next, env);
+
+            },
+            BlockBody::AssertLength { len, next } => {
+
+                let ok_label = format!("assert_length_ok_{}", env.next);
+                self.emit_imm_reg(len, Reg::R10, env); // keep og val in r10
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rax, Arg64::Reg(Reg::R10))));
+                self.emit(Instr::Cmp(BinArgs::ToReg(Reg::Rax, Arg32::Signed(0))));
+                self.emit(Instr::JCC(ConditionCode::GE, ok_label.clone()));
+
+
+                let err_code = SnakeErr::NegativeLength as i64;
+
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(err_code))));
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::R10))));
+
+                let frame_size = {
+                    let mut f = env.next;
+                    f += if f % 2 == 1 { 0 } else { 1 };
+                    f
+                };
+                self.emit(Instr::Sub(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+                self.emit(Instr::Call(JmpArgs::Label("snake_error".to_string())));
+
+                // ok path
+                self.emit(Instr::Label(ok_label));
+                self.emit_block_body(next, env);
+
+            }
+            BlockBody::AssertInBounds { bound, arg, next } => {
+                let ok_label = format!("assert_in_bounds_ok_{}", env.next);
+                let err_label = format!("assert_in_bounds_fail_{}", env.next);
+
+
+                self.emit_imm_reg(arg, Reg::R10, env);    // R10 = arg (preserve for error)
+                self.emit_imm_reg(bound, Reg::Rax, env);
+
+                // check arg < bound
+                self.emit(Instr::Cmp(BinArgs::ToReg(Reg::Rax, Arg32::Reg(Reg::R10))));
+                self.emit(Instr::JCC(ConditionCode::LE, err_label.clone())); // if bound <= arg, error
+
+                // check arg >= 0
+                self.emit(Instr::Cmp(BinArgs::ToReg(Reg::R10, Arg32::Signed(0))));
+                self.emit(Instr::JCC(ConditionCode::L, err_label.clone()));
+
+                // both checks passed
+                self.emit(Instr::Jmp(JmpArgs::Label(ok_label.clone())));
+
+                // error path
+                self.emit(Instr::Label(err_label));
+                // retag the index for the error message (shift left 1)
+                self.emit(Instr::Sal(ShArgs { reg: Reg::R10, by: 1 }));
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(SnakeErr::IndexOutOfBounds as i64))));
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::R10))));
+                let frame_size = {
+                    let mut f = env.next;
+                    f += if f % 2 == 1 { 0 } else { 1 };
+                    f
+                };
+                self.emit(Instr::Sub(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+                self.emit(Instr::Call(JmpArgs::Label("snake_error".to_string())));
+
+                // ok path
+                self.emit(Instr::Label(ok_label));
+                self.emit_block_body(next, env);
+            },
+            BlockBody::Store { addr, offset, val, next } => {
+                self.emit_imm_reg(addr, Reg::Rax, env);
+                self.emit_imm_reg(offset, Reg::R10, env);
+                self.emit_imm_reg(val, Reg::R9, env);
+                // addr[offset] = val
+                // addr + offset * 8
+                self.emit(Instr::IMul(BinArgs::ToReg(Reg::R10, Arg32::Unsigned(8))));
+                self.emit(Instr::Add(BinArgs::ToReg(Reg::Rax, Arg32::Reg(Reg::R10))));
+                self.emit(Instr::Mov(MovArgs::ToMem(
+                    MemRef { reg: Reg::Rax, offset: 0 },
+                    Reg32::Reg(Reg::R9)
+                )));
+                self.emit_block_body(next, env);
+            },
         }
     }
 
@@ -201,10 +323,10 @@ impl Emitter {
                         self.emit(Instr::Mov(MovArgs::ToReg(Reg::R10, Arg64::Signed(-1))));
                         self.emit(Instr::Xor(BinArgs::ToReg(Reg::Rax, Arg32::Reg(Reg::R10))));
                     }
-                    Prim1::BitSal(_) => todo!(),
-                    Prim1::BitSar(_) => todo!(),
-                    Prim1::BitShl(_) => todo!(),
-                    Prim1::BitShr(_) => todo!(),
+                    Prim1::BitSal(n) => self.emit(Instr::Sal(ShArgs { reg: Reg::Rax, by: *n })),
+                    Prim1::BitSar(n) => self.emit(Instr::Sar(ShArgs { reg: Reg::Rax, by: *n })),
+                    Prim1::BitShl(n) => self.emit(Instr::Shl(ShArgs { reg: Reg::Rax, by: *n })),
+                    Prim1::BitShr(n) => self.emit(Instr::Shr(ShArgs { reg: Reg::Rax, by: *n })),
                 }
             }
             Operation::Prim2(op, imm1, imm2) => {
@@ -212,9 +334,18 @@ impl Emitter {
                 self.emit_imm_reg(imm2, Reg::R10, env);
                 let ba = BinArgs::ToReg(Reg::Rax, Arg32::Reg(Reg::R10));
                 match op {
-                    Prim2::Add => self.emit(Instr::Add(ba)),
-                    Prim2::Sub => self.emit(Instr::Sub(ba)),
-                    Prim2::Mul => self.emit(Instr::IMul(ba)),
+                    Prim2::Add => {
+                        self.emit(Instr::Add(ba));
+                        self.emit_overflow_check(env);
+                    },
+                    Prim2::Sub => {
+                        self.emit(Instr::Sub(ba));
+                        self.emit_overflow_check(env);
+                    },
+                    Prim2::Mul => {
+                        self.emit(Instr::IMul(ba));
+                        self.emit_overflow_check(env);
+                    },
                     Prim2::BitAnd => self.emit(Instr::And(ba)),
                     Prim2::BitOr => self.emit(Instr::Or(ba)),
                     Prim2::BitXor => self.emit(Instr::Xor(ba)),
@@ -262,8 +393,26 @@ impl Emitter {
                 // move the stack pointer back to the previous stack frame
                 self.emit(Instr::Add(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
             }
-            Operation::AllocateArray { len } => todo!(),
-            Operation::Load { addr, offset } => todo!(),
+            Operation::AllocateArray { len } => {
+                self.emit_imm_reg(len, Reg::Rdi, env);
+                let frame_size = {
+                    let mut f = env.next;
+                    f += if f % 2 == 1 { 0 } else { 1 };
+                    f
+                };
+                self.emit(Instr::Sub(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+                self.emit(Instr::Call(JmpArgs::Label("snake_new_array".to_string())));
+                self.emit(Instr::Add(BinArgs::ToReg(Reg::Rsp, Arg32::Signed(8 * frame_size))));
+            },
+            Operation::Load { addr, offset } => {
+                self.emit_imm_reg(addr, Reg::Rax, env);
+                self.emit_imm_reg(offset, Reg::R10, env);
+                self.emit(Instr::IMul(BinArgs::ToReg(Reg::R10, Arg32::Signed(8))));
+                self.emit(Instr::Add(BinArgs::ToReg(Reg::Rax, Arg32::Reg(Reg::R10))));
+                self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rax, Arg64::Mem(
+                    MemRef { reg: Reg::Rax, offset: 0 },
+                ))));
+            },
         }
 
         let dst = env.allocate(dest);
