@@ -122,53 +122,30 @@ impl Lifter {
     }
 
     fn lift_prog(&mut self, prog: &BoundProg) {
-        let Prog {
-            externs: _,
-            name,
-            param: _,
-            body,
-            loc: _,
-        } = prog;
+        let Prog {externs: _, name, param: _, body, loc: _,} = prog;
         self.lift_expr(body, &name, true);
     }
 
     fn lift_expr(&mut self, e: &BoundExpr, site: &FunName, tail_position: bool) {
         match e {
             Expr::Num(_, _) | Expr::Bool(_, _) | Expr::Var(_, _) => {}
-            Expr::Prim {
-                prim: _,
-                args,
-                loc: _,
-            } => {
+            Expr::Prim {prim: _, args, loc: _,} => {
                 for arg in args {
                     self.lift_expr(arg, site, false);
                 }
             }
-            Expr::Let {
-                bindings,
-                body,
-                loc: _,
-            } => {
+            Expr::Let {bindings, body, loc: _,} => {
                 for Binding { var: _, expr } in bindings {
                     self.lift_expr(expr, site, false);
                 }
                 self.lift_expr(body, site, tail_position);
             }
-            Expr::If {
-                cond,
-                thn,
-                els,
-                loc: _,
-            } => {
+            Expr::If {cond, thn, els, loc: _,} => {
                 self.lift_expr(cond, site, false);
                 self.lift_expr(thn, site, tail_position);
                 self.lift_expr(els, site, tail_position);
             }
-            Expr::FunDefs {
-                decls,
-                body,
-                loc: _,
-            } => {
+            Expr::FunDefs {decls, body, loc: _,} => {
                 for FunDecl { name, body, .. } in decls {
                     self.lift_expr(body, name, true);
                 }
@@ -198,13 +175,7 @@ impl Lowerer {
         self.should_lift = lifter.should_lift();
 
         // then, lower the program
-        let Prog {
-            externs,
-            name,
-            param,
-            body,
-            loc: _,
-        } = prog;
+        let Prog {externs, name, param, body, loc: _,} = prog;
         // register function scope for the main function
         self.fun_scopes.insert(name.clone(), Vec::new());
         // create a block name for the main function
@@ -212,11 +183,7 @@ impl Lowerer {
         self.fun_as_block.insert(name.clone(), block.clone());
         // lower the externs
         let externs = Vec::from_iter(externs.into_iter().map(
-            |ExtDecl {
-                 name,
-                 params,
-                 loc: _,
-             }| Extern {
+            |ExtDecl {name, params, loc: _,}| Extern {
                 name,
                 params: params.into_iter().map(|(p, _)| p).collect(),
             },
@@ -224,12 +191,7 @@ impl Lowerer {
         // lower the parameter
         let (param, _) = param;
         // lower the body
-        let body = self.lower_expr_kont(
-            body,
-            &vec![param.clone()],
-            &Substitution::new(),
-            Continuation::Return,
-        );
+        let body = self.lower_expr_kont(body, &vec![param.clone()], &Substitution::new(), Continuation::Return,);
         // collect the lifted functions and blocks
         let (mut funs, mut blocks): (Vec<FunBlock>, Vec<BasicBlock>) =
             std::mem::take(&mut self.lifted_funs).into_iter().unzip();
@@ -248,11 +210,7 @@ impl Lowerer {
                 args: vec![Immediate::Var(fun_param)],
             },
         });
-        Program {
-            externs,
-            funs,
-            blocks,
-        }
+        Program {externs, funs, blocks,}
     }
 
     fn kont_to_block(&mut self, k: Continuation) -> (VarName, BlockBody) {
@@ -300,12 +258,7 @@ impl Lowerer {
                             }),
                         };
 
-                        lowerer.lower_expr_kont(
-                            arg,
-                            live,
-                            subst,
-                            Continuation::Block(arg_var, body),
-                        )
+                        lowerer.lower_expr_kont(arg, live, subst, Continuation::Block(arg_var, body),)
                     };
                 let lower_binary =
                     |lowerer: &mut Lowerer,
@@ -337,18 +290,8 @@ impl Lowerer {
                             }),
                         };
 
-                        let body = lowerer.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
-                        lowerer.lower_expr_kont(
-                            lhs,
-                            live,
-                            subst,
-                            Continuation::Block(lhs_var, body),
-                        )
+                        let body = lowerer.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
+                        lowerer.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body),)
                     };
                 let lower_cmp = |lowerer: &mut Lowerer,
                                  prim2: Prim2,
@@ -396,12 +339,7 @@ impl Lowerer {
                         }),
                     };
 
-                    let body = lowerer.lower_expr_kont(
-                        rhs,
-                        live,
-                        subst,
-                        Continuation::Block(rhs_var, body),
-                    );
+                    let body = lowerer.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                     lowerer.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                 };
                 match prim {
@@ -442,7 +380,7 @@ impl Lowerer {
                                     next: Box::new(BlockBody::Operation {
                                         dest,
                                         op: Operation::Prim2(
-                                            Prim2::Sub,
+                                            Prim2::Mul,
                                             Immediate::Var(untagged.clone()),
                                             Immediate::Var(rhs_var.clone()),
                                         ),
@@ -451,12 +389,7 @@ impl Lowerer {
                                 }),
                             }),
                         };
-                        let body = self.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
+                        let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
                     Prim::Eq => {
@@ -496,12 +429,7 @@ impl Lowerer {
                                 }),
                             }),
                         };
-                        let body = self.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
+                        let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
                     Prim::Neq => {
@@ -541,12 +469,7 @@ impl Lowerer {
                                 }),
                             }),
                         };
-                        let body = self.lower_expr_kont(
-                            rhs,
-                            live,
-                            subst,
-                            Continuation::Block(rhs_var, body),
-                        );
+                        let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     },
                     Prim::IsType(ty) => {
@@ -788,11 +711,7 @@ impl Lowerer {
                     },
                 }
             }
-            Expr::Let {
-                bindings,
-                body,
-                loc: _,
-            } => {
+            Expr::Let {bindings, body, loc: _,} => {
                 // collect the live variables up to this point
                 let mut live = live
                     .to_owned()
@@ -811,56 +730,58 @@ impl Lowerer {
                 bindings.into_iter().rev().fold(
                     block,
                     |block,
-                     Binding {
-                         var: (var, _),
-                         expr,
-                     }| {
+                     Binding {var: (var, _), expr}| {
                         live.pop();
-                        let expr = self.lower_expr_kont(
-                            expr,
-                            &live,
-                            subst,
-                            Continuation::Block(var.clone(), block),
-                        );
+                        let expr = self.lower_expr_kont(expr, &live, subst, Continuation::Block(var.clone(), block),);
                         expr
                     },
                 )
             }
-            Expr::If {cond, thn, els, loc: _,} => {
-
+            Expr::If { cond, thn, els, loc: _, } => {
                 let cond_var = self.vars.fresh("cond_var");
                 let test_var = self.vars.fresh("cond_test");
                 let thn_block = self.blocks.fresh("then");
                 let els_block = self.blocks.fresh("else");
-                let join_block = self.blocks.fresh("join");
-                let (dest, next) = self.kont_to_block(k);
 
-                let thn_result = self.vars.fresh("thn_result");
-                let thn_cont = Continuation::Block(
-                    thn_result.clone(),
-                    BlockBody::Terminator(Terminator::Branch(Branch {
-                        target: join_block.clone(),
-                        args: vec![Immediate::Var(thn_result)],
-                    })),
-                );
-                let els_result = self.vars.fresh("els_result");
-                let els_cont = Continuation::Block(
-                    els_result.clone(),
-                    BlockBody::Terminator(Terminator::Branch(Branch {
-                        target: join_block.clone(),
-                        args: vec![Immediate::Var(els_result)],
-                    })),
-                );
+                let (thn_cont, els_cont, join_blocks) = match k {
+                    Continuation::Return => {
+                        (Continuation::Return, Continuation::Return, vec![])
+                    }
+                    Continuation::Block(dest, next) => {
+                        let join_block = self.blocks.fresh("join");
+                        let thn_result = self.vars.fresh("thn_result");
+                        let thn_cont = Continuation::Block(
+                            thn_result.clone(),
+                            BlockBody::Terminator(Terminator::Branch(Branch {
+                                target: join_block.clone(),
+                                args: vec![Immediate::Var(thn_result)],
+                            })),
+                        );
+                        let els_result = self.vars.fresh("els_result");
+                        let els_cont = Continuation::Block(
+                            els_result.clone(),
+                            BlockBody::Terminator(Terminator::Branch(Branch {
+                                target: join_block.clone(),
+                                args: vec![Immediate::Var(els_result)],
+                            })),
+                        );
+                        let join = BasicBlock {
+                            label: join_block,
+                            params: vec![dest],
+                            body: next,
+                        };
+                        (thn_cont, els_cont, vec![join])
+                    }
+                };
 
                 let thn_body = self.lower_expr_kont(*thn, live, subst, thn_cont);
                 let els_body = self.lower_expr_kont(*els, live, subst, els_cont);
 
-                // join block receives the result and continues
-                let join = BasicBlock {
-                    label: join_block,
-                    params: vec![dest],
-                    body: next,
-                };
+                let mut blocks = vec![
+                    BasicBlock { label: thn_block.clone(), params: vec![], body: thn_body },
+                    BasicBlock { label: els_block.clone(), params: vec![], body: els_body },
+                ];
+                blocks.extend(join_blocks);
 
                 let body = BlockBody::AssertType {
                     ty: Type::Bool,
@@ -869,11 +790,7 @@ impl Lowerer {
                         dest: test_var.clone(),
                         op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(cond_var.clone()), Immediate::Const(0b100)),
                         next: Box::new(BlockBody::SubBlocks {
-                            blocks: vec![
-                                BasicBlock { label: thn_block.clone(), params: vec![], body: thn_body },
-                                BasicBlock { label: els_block.clone(), params: vec![], body: els_body },
-                                join,
-                            ],
+                            blocks,
                             next: Box::new(BlockBody::Terminator(Terminator::ConditionalBranch {
                                 cond: Immediate::Var(test_var.clone()),
                                 thn: thn_block,
@@ -885,11 +802,7 @@ impl Lowerer {
 
                 self.lower_expr_kont(*cond, live, subst, Continuation::Block(cond_var, body))
             }
-            Expr::FunDefs {
-                decls,
-                body,
-                loc: _,
-            } => {
+            Expr::FunDefs {decls, body, loc: _,} => {
                 // create a block name for each function
                 for FunDecl { name: fun, .. } in decls.iter() {
                     let block = self.blocks.fresh(fun.hint());
@@ -904,12 +817,7 @@ impl Lowerer {
                     blocks: decls
                         .into_iter()
                         .filter_map(
-                            |FunDecl {
-                                 name: fun,
-                                 params,
-                                 body,
-                                 loc: _,
-                             }| {
+                            |FunDecl {name: fun, params, body, loc: _,}| {
                                 let live = live
                                     .to_owned()
                                     .into_iter()
@@ -939,12 +847,7 @@ impl Lowerer {
                                     let fun_params = params.into_iter().map(|(p, _)| p);
                                     // parameters are ambient live variables and the function parameters combined
                                     let params = ambient.chain(fun_params).collect::<Vec<_>>();
-                                    let body = self.lower_expr_kont(
-                                        body,
-                                        &live,
-                                        &subst,
-                                        Continuation::Return,
-                                    );
+                                    let body = self.lower_expr_kont(body, &live, &subst, Continuation::Return,);
                                     let funblock_params = params
                                         .iter()
                                         .map(|p| self.vars.fresh(p.hint()))
@@ -973,12 +876,7 @@ impl Lowerer {
                                     Some(BasicBlock {
                                         label: block.clone(),
                                         params: params.into_iter().map(|(p, _)| p).collect(),
-                                        body: self.lower_expr_kont(
-                                            body,
-                                            &live,
-                                            subst,
-                                            Continuation::Return,
-                                        ),
+                                        body: self.lower_expr_kont(body, &live, subst, Continuation::Return),
                                     })
                                 }
                             },
@@ -1004,12 +902,7 @@ impl Lowerer {
                         .zip(args_var)
                         .rev()
                         .fold(block, |block, (arg, var)| {
-                            lowerer.lower_expr_kont(
-                                arg,
-                                &live,
-                                subst,
-                                Continuation::Block(var, block),
-                            )
+                            lowerer.lower_expr_kont(arg, &live, subst, Continuation::Block(var, block),)
                         })
                 };
                 if fun.is_unmangled() {
