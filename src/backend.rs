@@ -213,6 +213,8 @@ impl Emitter {
 
                 let err_code = SnakeErr::NegativeLength as i64;
 
+                // retag the length (shift left 1) so sprint_snake_val can print it correctly
+                self.emit(Instr::Sal(ShArgs { reg: Reg::R10, by: 1 }));
                 self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(err_code))));
                 self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::R10))));
 
