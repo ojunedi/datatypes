@@ -31,5 +31,36 @@ pub extern "C" fn snake_error(ecode: SnakeErr, v: SnakeValue) -> SnakeValue {
 /* Implement the following function for printing a snake value.
 **/
 pub fn sprint_snake_val(x: SnakeValue) -> String {
-    todo!("implement this")
+    let mut seen = HashSet::new();
+    sprint_snake_val_rec(x, &mut seen)
+}
+
+fn sprint_snake_val_rec(x: SnakeValue, seen: &mut HashSet<u64>) -> String {
+    let v = x.0;
+    if v & INT_MASK == INT_TAG {
+        // Int: untag by arithmetic shift right 1
+        format!("{}", unsigned_to_signed(v) >> 1)
+    } else if v & FULL_MASK == BOOL_TAG {
+        if x == SNAKE_TRU {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }
+    } else if v & FULL_MASK == ARRAY_TAG {
+        let ptr = v & !FULL_MASK;
+        if !seen.insert(ptr) {
+            return "<loop>".to_string();
+        }
+        let arr = load_snake_array(ptr as *const u64);
+        let elts: Vec<String> = (0..arr.size)
+            .map(|i| {
+                let elt = unsafe { *arr.elts.add(i as usize) };
+                sprint_snake_val_rec(elt, seen)
+            })
+            .collect();
+        seen.remove(&ptr);
+        format!("[{}]", elts.join(", "))
+    } else {
+        format!("<unknown value: {:#x}>", v)
+    }
 }

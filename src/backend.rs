@@ -36,11 +36,12 @@ impl<'a> Env<'a> {
 pub struct Emitter {
     // the output buffer for the sequence of instructions we are generating
     instrs: Vec<Instr>,
+    label_counter: u64,
 }
 
 impl From<Lowerer> for Emitter {
     fn from(Lowerer { .. }: Lowerer) -> Self {
-        Emitter { instrs: Vec::new() }
+        Emitter { instrs: Vec::new(), label_counter: 0 }
     }
 }
 
@@ -64,8 +65,14 @@ impl Emitter {
         self.instrs.push(instr);
     }
 
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        let n = self.label_counter;
+        self.label_counter += 1;
+        format!("{}_{}", prefix, n)
+    }
+
     fn emit_overflow_check<'a>(&mut self, env: &mut Env<'a>) {
-        let ok_label = format!("overflow_ok_{}", env.next);
+        let ok_label = self.fresh_label("overflow_ok");
         self.emit(Instr::JCC(ConditionCode::NO, ok_label.clone()));
         self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rdi, Arg64::Signed(SnakeErr::ArithmeticOverflow as i64))));
         self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rsi, Arg64::Reg(Reg::Rax))));
@@ -164,7 +171,7 @@ impl Emitter {
                 }
             }
             BlockBody::AssertType { ty, arg, next } => {
-                let ok_label = format!("assert_type_ok_{}", env.next);
+                let ok_label = self.fresh_label("assert_type_ok");
 
                 self.emit_imm_reg(arg, Reg::R10, env);
                 self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rax, Arg64::Reg(Reg::R10))));
@@ -197,7 +204,7 @@ impl Emitter {
             },
             BlockBody::AssertLength { len, next } => {
 
-                let ok_label = format!("assert_length_ok_{}", env.next);
+                let ok_label = self.fresh_label("assert_length_ok");
                 self.emit_imm_reg(len, Reg::R10, env); // keep og val in r10
                 self.emit(Instr::Mov(MovArgs::ToReg(Reg::Rax, Arg64::Reg(Reg::R10))));
                 self.emit(Instr::Cmp(BinArgs::ToReg(Reg::Rax, Arg32::Signed(0))));
@@ -223,8 +230,8 @@ impl Emitter {
 
             }
             BlockBody::AssertInBounds { bound, arg, next } => {
-                let ok_label = format!("assert_in_bounds_ok_{}", env.next);
-                let err_label = format!("assert_in_bounds_fail_{}", env.next);
+                let ok_label = self.fresh_label("assert_in_bounds_ok");
+                let err_label = self.fresh_label("assert_in_bounds_fail");
 
 
                 self.emit_imm_reg(arg, Reg::R10, env);    // R10 = arg (preserve for error)
