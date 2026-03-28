@@ -213,6 +213,74 @@ impl Lowerer {
         Program {externs, funs, blocks,}
     }
 
+    /// Wraps a raw comparison result (0 or 1) into a tagged boolean: shift left 2, OR with 0b001
+    fn tag_bool(&mut self, raw: VarName, dest: VarName, next: BlockBody) -> BlockBody {
+        let shifted = self.vars.fresh("shifted");
+        BlockBody::Operation {
+            dest: shifted.clone(),
+            op: Operation::Prim1(Prim1::BitSal(2), Immediate::Var(raw)),
+            next: Box::new(BlockBody::Operation {
+                dest,
+                op: Operation::Prim2(Prim2::BitOr, Immediate::Var(shifted), Immediate::Const(0b001)),
+                next: Box::new(next),
+            }),
+        }
+    }
+
+    /// Builds the shared preamble for array element access: assert types, untag
+    /// index and array pointer, load length, bounds-check, and compute the
+    /// element offset. The `make_inner` closure receives `(untagged_arr, offset_var)`
+    /// and returns the body to execute after bounds checking.
+    fn lower_array_access(
+        &mut self,
+        arr_var: VarName,
+        ind_var: VarName,
+        make_inner: impl FnOnce(VarName, VarName) -> BlockBody,
+    ) -> BlockBody {
+        let untagged_idx = self.vars.fresh("untagged_idx");
+        let untagged_arr = self.vars.fresh("untagged_arr");
+        let arr_len = self.vars.fresh("arr_len");
+        let offset_var = self.vars.fresh("arr_offset");
+
+        let inner = make_inner(untagged_arr.clone(), offset_var.clone());
+
+        let compute_offset = BlockBody::Operation {
+            dest: offset_var,
+            op: Operation::Prim2(Prim2::Add, Immediate::Var(untagged_idx.clone()), Immediate::Const(1)),
+            next: Box::new(inner),
+        };
+        let bounds_check = BlockBody::AssertInBounds {
+            bound: Immediate::Var(arr_len.clone()),
+            arg: Immediate::Var(untagged_idx.clone()),
+            next: Box::new(compute_offset),
+        };
+        let load_len = BlockBody::Operation {
+            dest: arr_len,
+            op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
+            next: Box::new(bounds_check),
+        };
+        let untag_arr = BlockBody::Operation {
+            dest: untagged_arr,
+            op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)),
+            next: Box::new(load_len),
+        };
+        let untag_idx = BlockBody::Operation {
+            dest: untagged_idx,
+            op: Operation::Prim1(Prim1::BitSar(1), Immediate::Var(ind_var.clone())),
+            next: Box::new(untag_arr),
+        };
+        let assert_int = BlockBody::AssertType {
+            ty: Type::Int,
+            arg: Immediate::Var(ind_var),
+            next: Box::new(untag_idx),
+        };
+        BlockBody::AssertType {
+            ty: Type::Array,
+            arg: Immediate::Var(arr_var),
+            next: Box::new(assert_int),
+        }
+    }
+
     fn kont_to_block(&mut self, k: Continuation) -> (VarName, BlockBody) {
         match k {
             Continuation::Block(x, b) => (x, b),
@@ -304,29 +372,16 @@ impl Lowerer {
                     let lhs_var = lowerer.vars.fresh("cmp_lhs");
                     let rhs_var = lowerer.vars.fresh("cmp_rhs");
                     let cmp_var = lowerer.vars.fresh("cmp_result");
-                    let shifted = lowerer.vars.fresh("cmp_shifted");
                     let (dest, next) = lowerer.kont_to_block(k);
 
-                    let tag_bool = BlockBody::Operation {
+                    let compare_and_tag = BlockBody::Operation {
                         dest: cmp_var.clone(),
                         op: Operation::Prim2(
                             prim2,
                             Immediate::Var(lhs_var.clone()),
                             Immediate::Var(rhs_var.clone()),
                         ),
-                        next: Box::new(BlockBody::Operation {
-                            dest: shifted.clone(),
-                            op: Operation::Prim1(Prim1::BitSal(2), Immediate::Var(cmp_var.clone())),
-                            next: Box::new(BlockBody::Operation {
-                                dest,
-                                op: Operation::Prim2(
-                                    Prim2::BitOr,
-                                    Immediate::Var(shifted.clone()),
-                                    Immediate::Const(0b001),
-                                ),
-                                next: Box::new(next),
-                            }),
-                        }),
+                        next: Box::new(lowerer.tag_bool(cmp_var, dest, next)),
                     };
 
                     let body = BlockBody::AssertType {
@@ -335,7 +390,7 @@ impl Lowerer {
                         next: Box::new(BlockBody::AssertType {
                             ty: assert_ty,
                             arg: Immediate::Var(rhs_var.clone()),
-                            next: Box::new(tag_bool),
+                            next: Box::new(compare_and_tag),
                         }),
                     };
 
@@ -392,95 +447,36 @@ impl Lowerer {
                         let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
-                    Prim::Eq => {
+                    // Eq and Neq don't need type assertions — we compare tagged
+                    // values directly, which implicitly checks type equality
+                    Prim::Eq | Prim::Neq => {
+                        let prim2 = if matches!(prim, Prim::Eq) { Prim2::Eq } else { Prim2::Neq };
                         let mut arg = args.into_iter();
                         let lhs = arg.next().unwrap();
                         let rhs = arg.next().unwrap();
 
                         let lhs_var = self.vars.fresh("eq_lhs");
                         let rhs_var = self.vars.fresh("eq_rhs");
-                        let shifted = self.vars.fresh("shifted");
                         let cmp_var = self.vars.fresh("cmp_var");
                         let (dest, next) = self.kont_to_block(k);
 
-                        // don't have to assert types because we just compare our internal
-                        // representation (tagged values) to compare types as well
                         let body = BlockBody::Operation {
                             dest: cmp_var.clone(),
                             op: Operation::Prim2(
-                                Prim2::Eq,
+                                prim2,
                                 Immediate::Var(lhs_var.clone()),
                                 Immediate::Var(rhs_var.clone()),
                             ),
-                            next: Box::new(BlockBody::Operation {
-                                dest: shifted.clone(),
-                                op: Operation::Prim1(
-                                    Prim1::BitSal(2),
-                                    Immediate::Var(cmp_var.clone()),
-                                ),
-                                next: Box::new(BlockBody::Operation {
-                                    dest,
-                                    op: Operation::Prim2(
-                                        Prim2::BitOr,
-                                        Immediate::Var(shifted.clone()),
-                                        Immediate::Const(0b001),
-                                    ),
-                                    next: Box::new(next),
-                                }),
-                            }),
+                            next: Box::new(self.tag_bool(cmp_var, dest, next)),
                         };
                         let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
                         self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
                     }
-                    Prim::Neq => {
-                        let mut arg = args.into_iter();
-                        let lhs = arg.next().unwrap();
-                        let rhs = arg.next().unwrap();
-
-                        let lhs_var = self.vars.fresh("eq_lhs");
-                        let rhs_var = self.vars.fresh("eq_rhs");
-                        let shifted = self.vars.fresh("shifted");
-                        let cmp_var = self.vars.fresh("cmp_var");
-                        let (dest, next) = self.kont_to_block(k);
-
-                        // don't have to assert types because we just compare our internal
-                        // representation (tagged values) to compare types as well
-                        let body = BlockBody::Operation {
-                            dest: cmp_var.clone(),
-                            op: Operation::Prim2(
-                                Prim2::Neq,
-                                Immediate::Var(lhs_var.clone()),
-                                Immediate::Var(rhs_var.clone()),
-                            ),
-                            next: Box::new(BlockBody::Operation {
-                                dest: shifted.clone(),
-                                op: Operation::Prim1(
-                                    Prim1::BitSal(2),
-                                    Immediate::Var(cmp_var.clone()),
-                                ),
-                                next: Box::new(BlockBody::Operation {
-                                    dest,
-                                    op: Operation::Prim2(
-                                        Prim2::BitOr,
-                                        Immediate::Var(shifted.clone()),
-                                        Immediate::Const(0b001),
-                                    ),
-                                    next: Box::new(next),
-                                }),
-                            }),
-                        };
-                        let body = self.lower_expr_kont(rhs, live, subst, Continuation::Block(rhs_var, body),);
-                        self.lower_expr_kont(lhs, live, subst, Continuation::Block(lhs_var, body))
-                    },
                     Prim::IsType(ty) => {
-                        // is the argument of the given `ty` type
-                        // check arg's tag matches ty tag
-                        // return a tagged boolean
                         let arg = args.into_iter().next().unwrap();
                         let arg_var = self.vars.fresh("type_var");
                         let masked = self.vars.fresh("masked_var");
                         let cmp_var = self.vars.fresh("cmp_var");
-                        let shifted = self.vars.fresh("shifted_var");
                         let (dest, next) = self.kont_to_block(k);
 
                         let body = BlockBody::Operation {
@@ -488,16 +484,8 @@ impl Lowerer {
                             op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arg_var.clone()), Immediate::Const(ty.mask())),
                             next: Box::new(BlockBody::Operation {
                                 dest: cmp_var.clone(),
-                                op: Operation::Prim2(Prim2::Eq, Immediate::Var(masked.clone()), Immediate::Const(ty.tag())),
-                                next: Box::new(BlockBody::Operation {
-                                    dest: shifted.clone(),
-                                    op: Operation::Prim1(Prim1::BitSal(2), Immediate::Var(cmp_var.clone())),
-                                    next: Box::new(BlockBody::Operation {
-                                        dest,
-                                        op: Operation::Prim2(Prim2::BitOr, Immediate::Var(shifted.clone()), Immediate::Const(0b001)),
-                                        next: Box::new(next),
-                                    }),
-                                }),
+                                op: Operation::Prim2(Prim2::Eq, Immediate::Var(masked), Immediate::Const(ty.tag())),
+                                next: Box::new(self.tag_bool(cmp_var, dest, next)),
                             })
                         };
                         self.lower_expr_kont(arg, live, subst, Continuation::Block(arg_var, body))
@@ -575,48 +563,19 @@ impl Lowerer {
                         let ind = args.next().unwrap();
                         let arr_var = self.vars.fresh("arr_var");
                         let ind_var = self.vars.fresh("ind_var");
-                        let untagged_idx = self.vars.fresh("untagged_idx");
-                        let arr_len = self.vars.fresh("arr_len");
-                        let untagged_arr = self.vars.fresh("untagged_arr");
-                        let offset_var = self.vars.fresh("arr_offset");
                         let (dest, next) = self.kont_to_block(k);
 
-                        let body = BlockBody::AssertType { // assert arr
-                            ty: Type::Array,
-                            arg: Immediate::Var(arr_var.clone()),
-                            next: Box::new(BlockBody::AssertType { // assert int
-                                ty: Type::Int,
-                                arg: Immediate::Var(ind_var.clone()),
-                                next: Box::new(BlockBody::Operation {
-                                    dest: untagged_idx.clone(),
-                                    op: Operation::Prim1(Prim1::BitSar(1), Immediate::Var(ind_var.clone())), // untag index
-                                    next: Box::new(BlockBody::Operation {
-                                        dest: untagged_arr.clone(),
-                                        op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)), // untag arr
-                                        next: Box::new(BlockBody::Operation {
-                                            dest: arr_len.clone(),
-                                            op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
-                                            next: Box::new(BlockBody::AssertInBounds {
-                                                bound: Immediate::Var(arr_len.clone()),
-                                                arg: Immediate::Var(untagged_idx.clone()),
-                                                next: Box::new(BlockBody::Operation {
-                                                    dest: offset_var.clone(),
-                                                    op: Operation::Prim2(Prim2::Add, Immediate::Var(untagged_idx.clone()), Immediate::Const(1)),
-                                                    next: Box::new(BlockBody::Operation {
-                                                        dest,
-                                                        op: Operation::Load {
-                                                            addr: Immediate::Var(untagged_arr.clone()),
-                                                            offset: Immediate::Var(offset_var.clone()),
-                                                        },
-                                                        next: Box::new(next),
-                                                    }),
-                                                }),
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        };
+                        let body = self.lower_array_access(
+                            arr_var.clone(), ind_var.clone(),
+                            |untagged_arr, offset_var| BlockBody::Operation {
+                                dest,
+                                op: Operation::Load {
+                                    addr: Immediate::Var(untagged_arr),
+                                    offset: Immediate::Var(offset_var),
+                                },
+                                next: Box::new(next),
+                            },
+                        );
 
                         let body = self.lower_expr_kont(ind, live, subst, Continuation::Block(ind_var, body));
                         self.lower_expr_kont(arr, live, subst, Continuation::Block(arr_var, body))
@@ -629,50 +588,21 @@ impl Lowerer {
                         let arr_var = self.vars.fresh("arr_var");
                         let ind_var = self.vars.fresh("ind_var");
                         let val_var = self.vars.fresh("val_var");
-                        let untagged_idx = self.vars.fresh("untagged_idx");
-                        let arr_len = self.vars.fresh("arr_len");
-                        let untagged_arr = self.vars.fresh("untagged_arr");
-                        let offset_var = self.vars.fresh("arr_offset");
                         let (dest, next) = self.kont_to_block(k);
 
-                        let body = BlockBody::AssertType { // assert arr
-                            ty: Type::Array,
-                            arg: Immediate::Var(arr_var.clone()),
-                            next: Box::new(BlockBody::AssertType { // assert int
-                                ty: Type::Int,
-                                arg: Immediate::Var(ind_var.clone()),
+                        let body = self.lower_array_access(
+                            arr_var.clone(), ind_var.clone(),
+                            |untagged_arr, offset_var| BlockBody::Store {
+                                addr: Immediate::Var(untagged_arr),
+                                offset: Immediate::Var(offset_var),
+                                val: Immediate::Var(val_var.clone()),
                                 next: Box::new(BlockBody::Operation {
-                                    dest: untagged_idx.clone(),
-                                    op: Operation::Prim1(Prim1::BitSar(1), Immediate::Var(ind_var.clone())), // untag index
-                                    next: Box::new(BlockBody::Operation {
-                                        dest: untagged_arr.clone(),
-                                        op: Operation::Prim2(Prim2::BitAnd, Immediate::Var(arr_var.clone()), Immediate::Const(!0b11)), // untag arr
-                                        next: Box::new(BlockBody::Operation {
-                                            dest: arr_len.clone(),
-                                            op: Operation::Load { addr: Immediate::Var(untagged_arr.clone()), offset: Immediate::Const(0) },
-                                            next: Box::new(BlockBody::AssertInBounds {
-                                                bound: Immediate::Var(arr_len.clone()),
-                                                arg: Immediate::Var(untagged_idx.clone()),
-                                                next: Box::new(BlockBody::Operation {
-                                                    dest: offset_var.clone(),
-                                                    op: Operation::Prim2(Prim2::Add, Immediate::Var(untagged_idx.clone()), Immediate::Const(1)),
-                                                    next: Box::new(BlockBody::Store {
-                                                        addr: Immediate::Var(untagged_arr.clone()),
-                                                        offset: Immediate::Var(offset_var.clone()),
-                                                        val: Immediate::Var(val_var.clone()),
-                                                        next: Box::new(BlockBody::Operation {
-                                                            dest,
-                                                            op: Operation::Immediate(Immediate::Var(val_var.clone())),
-                                                            next: Box::new(next),
-                                                        }),
-                                                    }),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
+                                    dest,
+                                    op: Operation::Immediate(Immediate::Var(val_var.clone())),
+                                    next: Box::new(next),
                                 }),
-                            }),
-                        };
+                            },
+                        );
 
                         let body = self.lower_expr_kont(val, live, subst, Continuation::Block(val_var, body));
                         let body = self.lower_expr_kont(ind, live, subst, Continuation::Block(ind_var, body));
@@ -729,11 +659,9 @@ impl Lowerer {
                 // reversed, as usual
                 bindings.into_iter().rev().fold(
                     block,
-                    |block,
-                     Binding {var: (var, _), expr}| {
+                    |block, Binding {var: (var, _), expr}| {
                         live.pop();
-                        let expr = self.lower_expr_kont(expr, &live, subst, Continuation::Block(var.clone(), block),);
-                        expr
+                        self.lower_expr_kont(expr, &live, subst, Continuation::Block(var, block))
                     },
                 )
             }

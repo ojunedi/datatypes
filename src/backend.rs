@@ -2,7 +2,6 @@
 //! representation into assembly code, mapping intermediate
 //! representation variables into concrete memory locations.
 
-use std::fmt::format;
 use crate::asm::*;
 use crate::identifiers::*;
 use crate::middle_end::Lowerer;
